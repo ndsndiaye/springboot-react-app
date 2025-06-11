@@ -1,4 +1,4 @@
-# Spring Boot - React App
+# Spring Boot - React Application
 
 
 
