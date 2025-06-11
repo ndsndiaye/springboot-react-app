@@ -190,8 +190,6 @@ jobs:
                Build: ${{  steps.build-info.outputs.build-number}}
                webhook_url: ${{ env.SLACK_WEBHOOK_URL }}
    
-    
-#---------------------
  deploy-staging:
     needs: continuous-integration
     runs-on: ubuntu-latest
@@ -283,8 +281,6 @@ jobs:
             ]" \
             --output text
 
-
-#--------------------------------
  functional-tests:
    needs: deploy-staging
    runs-on: ubuntu-latest
@@ -326,7 +322,6 @@ jobs:
            Build: ${{ needs.continuous-integration.outputs.build-number }}
            webhook_url: ${{ env.SLACK_WEBHOOK_URL }}
               
-#----------------------------------------
  performance-tests:
     needs: deploy-staging
     runs-on: ubuntu-latest
@@ -365,7 +360,6 @@ jobs:
           Build: ${{ needs.continuous-integration.outputs.build-number }}
         webhook_url: ${{ env.SLACK_WEBHOOK_URL }}
 
-#---------------------------------
  deploy-production:
     needs: [functional-tests, performance-tests]
     runs-on: ubuntu-latest
