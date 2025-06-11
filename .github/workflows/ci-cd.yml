@@ -1,0 +1,468 @@
+name: Pipeline CI/CD
+on:
+  push:
+    branches:
+      - 'feature/*'  
+      - 'main'       
+  pull_request:
+    branches:
+      - 'main'  
+
+env:
+  HARBOR_REGISTRY:  ${{ secrets.HARBOR_REGISTRY }}
+  HARBOR_PROJECT: ${{ secrets.HARBOR_PROJECT }}
+  SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+  SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+ 
+jobs: 
+ continuous-integration:
+    runs-on: ubuntu-latest
+    outputs:
+      frontend-image: ${{ steps.build-info.outputs.frontend-image }}
+      backend-image: ${{ steps.build-info.outputs.backend-image }}
+      build-number: ${{ steps.build-info.outputs.build-number }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Node js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: moodboard-frontend/package.json
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: maven
+
+    
+    - name: Install frontend dependencies
+      working-directory: ./moodboard-frontend
+      run: npm ci
+
+    - name: Build React application
+      working-directory: ./moodboard-frontend
+      run: npm run build
+
+    - name: Run Jest tests
+      working-directory: ./moodboard-frontend
+      run: npm run test -- --ci --coverage
+
+    - name: Upload Jest coverage report
+      uses: actions/upload-artifact@v4
+      with:
+        name: jest-coverage-report
+        path: ./moodboard-frontend/coverage/
+
+
+    - name: Build Spring Boot application
+      working-directory: ./moodboard-backend
+      run: mvn clean compile
+
+    - name: Run JUnit tests
+      working-directory: ./moodboard-backend
+      run: mvn test
+
+    - name: Archive JUnit test results
+      uses: actions/upload-artifact@v4
+      with:
+        name: junit-test-results
+        path: ./moodboard-backend/target/surefire-reports/
+
+
+    - name: SonarQube analysis - Frontend
+      working-directory: ./moodboard-frontend
+      run: |
+        npx sonar-scanner \
+          -Dsonar.projectKey=moodboard-frontend \
+          -Dsonar.sources=src \
+          -Dsonar.host.url=$SONAR_HOST_URL  \
+          -Dsonar.login=$SONAR_TOKEN \
+          -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+
+    - name: SonarQube analysis - Backend
+      working-directory: ./moodboard-backend
+      run: |
+       mvn sonar:sonar \
+          -Dsonar.projectKey=moodboard-backend \
+          -Dsonar.host.url=${{ env.SONAR_HOST_URL }} \
+          -Dsonar.login=${{ env.SONAR_TOKEN }}
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to Harbor Registry
+      uses: docker/login-action@v3
+      with:
+       registry: ${{ env.HARBOR_REGISTRY }}
+       username: ${{ secrets.HARBOR_USERNAME }}
+       password: ${{ secrets.HARBOR_PASSWORD }}
+
+    - name: Generate build info
+      id: build-info
+      run: |
+        BUILD_NUMBER=$(date +%Y%m%d%H%M%S)-${GITHUB_SHA:0:7}
+        echo "build-number=$BUILD_NUMBER" >> $GITHUB_OUTPUT
+        echo "frontend-image=${{ env.HARBOR_REGISTRY }}/${{ env.HARBOR_PROJECT }}/moodboard-frontend:$BUILD_NUMBER" >> $GITHUB_OUTPUT
+        echo "backend-image=${{ env.HARBOR_REGISTRY }}/${{ env.HARBOR_PROJECT }}/moodboard-backend:$BUILD_NUMBER" >> $GITHUB_OUTPUT
+
+    - name: Build Frontend Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./moodboard-frontend
+        file: ./moodboard-frontend/Dockerfile
+        push: false
+        load: true  
+        tags: |
+          frontend-local:latest
+          ${{ steps.build-info.outputs.frontend-image }}
+        build-args: |
+          REACT_APP_API_URL=${{ secrets.REACT_APP_API_URL }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Build Backend Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./moodboard-backend
+        file: ./moodboard-backend/Dockerfile
+        push: false
+        load: true  
+        tags: |
+          backend-local:latest
+          ${{ steps.build-info.outputs.backend-image }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Run Trivy vulnerability scanner - Frontend
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'frontend-local:latest' 
+        format: 'json'
+        output: 'trivy-frontend-results.json'
+
+    - name: Run Trivy vulnerability scanner - Backend
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'backend-local:latest'  
+        format: 'json'
+        output: 'trivy-backend-results.json'
+
+    - name: Upload Trivy scan results as artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: security-scan-reports
+        path: |
+          trivy-frontend-results.json
+          trivy-backend-results.json
+
+
+    - name: Push Frontend to Harbor
+      run: |
+        docker tag frontend-local:latest ${{ env.HARBOR_REGISTRY }}/${{ env.HARBOR_PROJECT }}/frontend:latest
+        docker tag frontend-local:latest ${{ steps.build-info.outputs.frontend-image }}
+        
+        docker push ${{ steps.build-info.outputs.frontend-image }}
+        docker push ${{ env.HARBOR_REGISTRY }}/${{ env.HARBOR_PROJECT }}/frontend:latest
+    
+
+    - name: Push Backend to Harbor
+      run: |
+        docker tag backend-local:latest ${{ env.HARBOR_REGISTRY }}/${{ env.HARBOR_PROJECT }}/backend:latest
+        docker tag backend-local:latest ${{ steps.build-info.outputs.backend-image }}
+
+        docker push ${{ steps.build-info.outputs.backend-image }}
+        docker push ${{ env.HARBOR_REGISTRY }}/${{ env.HARBOR_PROJECT }}/backend:latest
+
+    - name: Notify Slack - CI
+      if: always()
+      uses: 8398a7/action-slack@v3
+      with:
+           status: ${{ job.status }}
+           text: |
+               Continuous integration completed with status: ${{ job.status }}
+               Build: ${{  steps.build-info.outputs.build-number}}
+               webhook_url: ${{ env.SLACK_WEBHOOK_URL }}
+   
+    
+#---------------------
+ deploy-staging:
+    needs: continuous-integration
+    runs-on: ubuntu-latest
+    environment: staging
+  
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+  
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Create environment file
+      run: |
+        
+        cat > .env << EOF
+        DATASOURCE_USERNAME=${{ secrets.DB_USERNAME }}
+        DATASOURCE_PASSWORD=${{ secrets.DB_PASSWORD }}
+        DATASOURCE_URL=${{ secrets.DATASOURCE_URL }}
+        DATASOURCE_DRIVER=${{ secrets.DATASOURCE_DRIVER }}
+        DATABASE_PLATFORM=${{ secrets.DATABASE_PLATFORM }}
+        APP_URL=${{ secrets.APP_URL }}
+        REACT_APP_API_URL=${{ secrets.API_URL }}
+        HARBOR_REGISTRY=${{ env.HARBOR_REGISTRY }}
+        HARBOR_PROJECT=${{ env.HARBOR_PROJECT }}
+        EOF
+
+    - name: Copy deployment files to AWS
+      run: |
+
+        export $(cat .env | xargs)
+        envsubst < docker-compose.yml > docker-compose.resolved.yml
+        
+        
+        aws ssm send-command \
+          --instance-ids ${{ secrets.STAGING_MANAGER_INSTANCE_ID }} \
+          --document-name "AWS-RunShellScript" \
+          --parameters 'commands=[
+            "cat > /tmp/docker-compose.yml << \"DOCKER_COMPOSE_EOF\"",
+            "'"$(cat docker-compose.resolved.yml)"'",
+            "DOCKER_COMPOSE_EOF"
+          ]' \
+          --output text
+   
+
+    - name: Deploy to AWS Swarm
+      run: |
+        
+        aws ssm send-command \
+          --instance-ids ${{ secrets.STAGING_MANAGER_INSTANCE_ID }} \
+          --document-name "AWS-RunShellScript" \
+          --parameters "commands=[
+            \"docker login -u ${{ secrets.HARBOR_USERNAME }} -p ${{ secrets.HARBOR_PASSWORD }} ${{ env.HARBOR_REGISTRY }}\",
+            
+            \"docker pull ${{ env.HARBOR_REGISTRY }}/${{ env.HARBOR_PROJECT }}/frontend:latest\",
+            \"docker pull ${{ env.HARBOR_REGISTRY }}/${{ env.HARBOR_PROJECT }}/backend:latest\",
+            
+            \"cd /tmp\",
+             \"export \\$(cat .env | xargs)\",
+            \"docker stack deploy -c docker-compose.yml --with-registry-auth moodboard-staging\"
+            
+          ]" \
+          --output text
+
+    - name: Wait for deployment
+      run: |
+        
+        sleep 90
+
+    - name: Verify deployment
+      run: |
+        
+        
+        aws ssm send-command \
+          --instance-ids ${{ secrets.STAGING_MANAGER_INSTANCE_ID }} \
+          --document-name "AWS-RunShellScript" \
+          --parameters "commands=[
+            
+            \"docker stack ls\",
+            
+            \"docker service ls --filter label=com.docker.stack.namespace=moodboard-staging\",
+            
+            \"docker stack ps moodboard-staging --no-trunc\",
+            \"for i in {1..5}; do echo 'Check $i/5'; docker service ls --filter label=com.docker.stack.namespace=moodboard-staging --format 'table {{.Name}}\\t{{.Replicas}}'; sleep 10; done\"
+            ]" \
+            --output text
+
+
+#--------------------------------
+ functional-tests:
+   needs: deploy-staging
+   runs-on: ubuntu-latest
+      
+   steps:
+   - name: Checkout code
+     uses: actions/checkout@v4
+  
+   - name: Set up Node.js for Selenium
+     uses: actions/setup-node@v4
+     with:
+        node-version: '18'
+  
+   - name: Install Selenium dependencies
+     working-directory: ./tests/functional
+     run: npm ci
+  
+  
+   - name: Run Selenium tests
+     working-directory: ./tests/functional
+     run: |
+         mkdir -p reports
+         npm test
+     
+  
+   - name: Upload Selenium test results
+     uses: actions/upload-artifact@v4
+     with:
+      name: selenium-test-results
+      path: tests/functional/reports/
+  
+   - name: Notify Slack - Functional Tests
+     if: always()
+     uses: 8398a7/action-slack@v3
+     with:
+       status: ${{ job.status }}
+       text: |
+           Functional Tests completed with status: ${{ job.status }}
+           Build: ${{ needs.continuous-integration.outputs.build-number }}
+           webhook_url: ${{ env.SLACK_WEBHOOK_URL }}
+              
+#----------------------------------------
+ performance-tests:
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up JMeter
+      run: |
+        wget https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-5.6.2.tgz
+        tar -xzf apache-jmeter-5.6.2.tgz
+        sudo mv apache-jmeter-5.6.2 /opt/jmeter
+        sudo ln -s /opt/jmeter/bin/jmeter /usr/local/bin/jmeter
+
+    - name: Run JMeter performance tests
+      run: |
+        mkdir -p tests/performance/results/html
+        jmeter -n -t tests/performance/moodboard.jmx \
+               -l tests/performance/results/results.jtl \
+               -e -o tests/performance/results/html 
+
+    - name: Upload JMeter results
+      uses: actions/upload-artifact@v4
+      with:
+        name: jmeter-results
+        path: tests/performance/results/
+
+    - name: Notify Slack - Performance Tests
+      if: always()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        text: |
+          Performance Tests completed with status: ${{ job.status }}
+          Build: ${{ needs.continuous-integration.outputs.build-number }}
+        webhook_url: ${{ env.SLACK_WEBHOOK_URL }}
+
+#---------------------------------
+ deploy-production:
+    needs: [functional-tests, performance-tests]
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Create environment file
+        run: |      
+          cat > .env << EOF
+          DATASOURCE_USERNAME=${{ secrets.DB_USERNAME }}
+          DATASOURCE_PASSWORD=${{ secrets.DB_PASSWORD }}
+          DATASOURCE_URL=${{ secrets.DATASOURCE_URL }}
+          DATASOURCE_DRIVER=${{ secrets.DATASOURCE_DRIVER }}
+          DATABASE_PLATFORM=${{ secrets.DATABASE_PLATFORM }}
+          APP_URL=${{ secrets.APP_URL }}
+          REACT_APP_API_URL=${{ secrets.API_URL }}
+          HARBOR_REGISTRY=${{ env.HARBOR_REGISTRY }}
+          HARBOR_PROJECT=${{ env.HARBOR_PROJECT }}
+          EOF
+
+      - name: Copy deployment files to AWS
+        run: |
+
+          export $(cat .env | xargs)
+          envsubst < docker-compose.yml > docker-compose.resolved.yml
+          
+          
+          aws ssm send-command \
+            --instance-ids ${{ secrets.PROD_MANAGER_INSTANCE_ID }} \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "cat > /tmp/docker-compose.yml << \"DOCKER_COMPOSE_EOF\"",
+              "'"$(cat docker-compose.resolved.yml)"'",
+              "DOCKER_COMPOSE_EOF"
+            ]' \
+            --output text
+   
+
+      - name: Deploy to AWS Swarm
+        run: |   
+          aws ssm send-command \
+            --instance-ids ${{ secrets.PROD_MANAGER_INSTANCE_ID }} \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[
+              \"docker login -u ${{ secrets.HARBOR_USERNAME }} -p ${{ secrets.HARBOR_PASSWORD }} ${{ env.HARBOR_REGISTRY }}\",
+              
+              \"docker pull ${{ env.HARBOR_REGISTRY }}/${{ env.HARBOR_PROJECT }}/frontend:latest\",
+              \"docker pull ${{ env.HARBOR_REGISTRY }}/${{ env.HARBOR_PROJECT }}/backend:latest\",
+              
+              \"cd /tmp\",
+               \"export \\$(cat .env | xargs)\",
+              \"docker stack deploy -c docker-compose.yml --with-registry-auth moodboard-production\"
+              
+            ]" \
+            --output text
+
+      - name: Wait for deployment
+        run: |
+          
+          sleep 90
+
+      - name: Verify deployment
+        run: |
+          
+          
+          aws ssm send-command \
+            --instance-ids ${{ secrets.PROD_MANAGER_INSTANCE_ID }} \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[
+              
+              \"docker stack ls\",
+              
+              \"docker service ls --filter label=com.docker.stack.namespace=moodboard-production\",
+              
+              \"docker stack ps moodboard-production --no-trunc\",
+              \"for i in {1..5}; do echo 'Check $i/5'; docker service ls --filter label=com.docker.stack.namespace=moodboard-production --format 'table {{.Name}}\\t{{.Replicas}}'; sleep 10; done\"
+              ]" \
+              --output text
+       
+      
+      - name: Notify Slack
+        if: always()
+        uses: 8398a7/action-slack@v3
+        with:
+           status: ${{ job.status }}
+           text: |
+               Deployment to production completed with status: ${{ job.status }}
+               Build: ${{ needs.continuous-integration.outputs.build-number }}
+               webhook_url: ${{ env.SLACK_WEBHOOK_URL }}
