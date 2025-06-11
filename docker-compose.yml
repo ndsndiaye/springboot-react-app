@@ -1,0 +1,72 @@
+version: '3.8'
+
+volumes:
+  pgdata:
+
+networks:
+  app-network:
+    driver: overlay  
+    attachable: true 
+  frontend:
+    driver: overlay    
+    attachable: true 
+
+services:
+  database:
+    image: postgres:16.2-alpine
+    deploy:              
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+    environment:
+      POSTGRES_USER: ${DATASOURCE_USERNAME}
+      POSTGRES_PASSWORD: ${DATASOURCE_PASSWORD}
+      POSTGRES_DB: lecloudfacile
+    volumes:
+      - pgdata:/var/lib/postgresql/data 
+    networks:
+      - app-network
+
+  adminer:
+    image: adminer
+    deploy:              
+      replicas: 1
+    networks:
+      - app-network
+      - frontend
+
+  backend:
+    image: ${HARBOR_REGISTRY}/${HARBOR_PROJECT}/backend:latest
+    deploy:              
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 10s
+    
+    environment:
+      SPRING_DATASOURCE_URL: ${DATASOURCE_URL}
+      SPRING_DATASOURCE_USERNAME: ${DATASOURCE_USERNAME}
+      SPRING_DATASOURCE_PASSWORD: ${DATASOURCE_PASSWORD}
+      FRONTEND_APP_URL: ${APP_URL}
+      SPRING_DATASOURCE_DRIVER: ${DATASOURCE_DRIVER}
+      SPRING_JPA_DATABASE_PLATFORM: ${DATABASE_PLATFORM}
+      SPRING_JPA_DDL_AUTO: update
+    networks:
+      - app-network
+      - frontend
+
+  frontend:
+    
+    image: ${HARBOR_REGISTRY}/${HARBOR_PROJECT}/frontend:latest
+    deploy:              
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 10s
+    environment:
+      REACT_APP_API_URL: ${REACT_APP_API_URL}
+    
+    networks:
+      - app-network
+      - frontend

@@ -1,0 +1,12 @@
+{
+  "name": "moodboard-functional-tests",
+  "version": "1.0.0",
+  "scripts": {
+     "test": "JEST_JUNIT_OUTPUT_DIR=./reports jest --testPathPattern=test/ --verbose --reporters=default --reporters=jest-junit"
+  },
+  "dependencies": {
+    "selenium-webdriver": "^4.15.0",
+    "jest": "^29.7.0",
+    "jest-junit": "^16.0.0"
+  }
+}
