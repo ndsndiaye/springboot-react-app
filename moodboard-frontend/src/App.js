@@ -5,25 +5,46 @@ import { Container, Row, Col} from 'react-bootstrap';
 import { Typography, Box, IconButton } from '@mui/material';
 import { Feedback } from '@mui/icons-material';
 
-
-const apiUrl = process.env.REACT_APP_API_URL;
-
-console.log(apiUrl);
 function App() {
+    const getApiUrl = () => {
+        const hostname = window.location.hostname;
+        
+        if (hostname.includes('fasttrack-prod')) {
+            return 'http://fasttrack-api-prod.moodapp.io/api';
+        }
+        
+        if (hostname.includes('fasttrack-staging')) {
+            return 'http://fasttrack-api-staging.moodapp.io/api';
+        }
+        
+        
+         return 'http://fasttrack-api-staging.moodapp.io/api';
+    };
+
+    const apiUrl = getApiUrl();
+
     const handleFeedbackSubmit = (feedback) => {
-        fetch(`${apiUrl}`, {
+        console.log('Submitting feedback to:', `${apiUrl}/feedback`);
+        
+        fetch(`${apiUrl}/feedback`, {  
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify(feedback),
         })
-            .then(response => response.json())
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
             .then(data => {
                 console.log('Success:', data);
             })
             .catch((error) => {
-                console.error('Error:', error);
+                console.error('Error submitting feedback:', error);
+                console.error('URL used:', `${apiUrl}/feedback`);
             });
     };
 
