@@ -3,7 +3,7 @@ const chrome = require('selenium-webdriver/chrome');
 
 describe('Mood Functional Tests', () => {
   let driver;
-  const baseUrl = 'http://44.206.228.38/';
+  const baseUrl = 'http://44.222.194.210/';
 
   
   beforeAll(async () => {
